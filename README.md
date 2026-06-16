@@ -2,7 +2,9 @@
 
 A browser-based tool for annotating rap lyrics, beats, and literary devices.
 
-**Live app (after you publish):** `https://YOUR-GITHUB-USERNAME.github.io/musc120-rap/`
+**Live app:** [https://seth-hahn.github.io/Rhyme-Annotation-Player/](https://seth-hahn.github.io/Rhyme-Annotation-Player/)
+
+**For teachers and students:** see **[GUIDE.md](GUIDE.md)** — workflows, collaboration, sharing, and export options in plain language.
 
 ---
 
@@ -57,20 +59,22 @@ Changes go live in about a minute.
 
 ## For students (simple)
 
+See **[GUIDE.md](GUIDE.md)** for the full walkthrough. In short:
+
 1. Open the class link (or scan the QR code from **Share / QR**)
 2. Annotate directly on the grid
 3. Use **+** to add your own board tab if working in groups
 4. **Export CSV** to turn in your work
 
-No Terminal, no local server, no file downloads required.
-
 ---
 
 ## For instructors
 
+See **[GUIDE.md](GUIDE.md)** for the full walkthrough. In short:
+
 - Open the hosted URL (not the file from Downloads)
-- Click **Share / QR** — the QR code works on any phone or laptop
-- Students who scan join the same board room; cloud sync loads your starting grid
+- Click **Share / QR** after preparing the grid — the QR code includes your annotations
+- Students add their own tab with **+**
 - Use **Compare** to see differences between student tabs
 
 ---
