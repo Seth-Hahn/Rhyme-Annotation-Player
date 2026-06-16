@@ -937,20 +937,64 @@ License: MIT
 
   const parseRoomFromUrl = () => {
     const params = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
     let room = params.get("room");
     const tab = params.get("tab");
-    const cloud = params.get("cloud");
-    const editKey = params.get("key");
+    const packed = params.get("z") || hashParams.get("z");
     if (!room) {
       const hash = (window.location.hash || "").replace(/^#/, "");
       const m = hash.match(/^room\/([^/?]+)/);
       if (m) room = decodeURIComponent(m[1]);
     }
-    return { room, tab, cloud, editKey };
+    return { room, tab, packed };
   };
 
-  const CLOUD_META_KEY = (roomId) => `${STORAGE_PREFIX}_cloud_${roomId}`;
   const SHARE_BASE_KEY = `${STORAGE_PREFIX}_share_base`;
+
+  const toBase64Url = (bytes) => {
+    let bin = "";
+    const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  };
+
+  const fromBase64Url = (str) => {
+    let s = (str || "").replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  };
+
+  const packRoomDoc = async (doc) => {
+    const json = JSON.stringify(doc);
+    if (typeof CompressionStream !== "undefined") {
+      const blob = new Blob([json], { type: "application/json" });
+      const buf = await new Response(blob.stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
+      return "gz." + toBase64Url(new Uint8Array(buf));
+    }
+    return "raw." + toBase64Url(new TextEncoder().encode(json));
+  };
+
+  const unpackRoomDoc = async (packed) => {
+    if (!packed) throw new Error("No board data in link");
+    if (packed.startsWith("gz.")) {
+      const bytes = fromBase64Url(packed.slice(3));
+      if (typeof DecompressionStream === "undefined") {
+        throw new Error("This browser cannot decode shared boards. Try Chrome or Safari.");
+      }
+      const text = await new Response(
+        new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))
+      ).text();
+      return JSON.parse(text);
+    }
+    if (packed.startsWith("raw.")) {
+      const bytes = fromBase64Url(packed.slice(4));
+      return JSON.parse(new TextDecoder().decode(bytes));
+    }
+    throw new Error("Unrecognized board link format");
+  };
 
   const isHostedOnline = () => {
     const h = window.location.hostname;
@@ -973,52 +1017,16 @@ License: MIT
     return "";
   };
 
-  const buildShareUrl = (shareBase, roomId, tabId, cloudId, editKey) => {
+  const buildShareUrl = (shareBase, roomId, tabId, packed) => {
     const base = (shareBase || getShareBaseUrl()).replace(/\/$/, "");
     if (!base || base.startsWith("file:")) return "";
     const params = new URLSearchParams();
     if (roomId) params.set("room", roomId);
     if (tabId) params.set("tab", tabId);
-    if (cloudId) params.set("cloud", cloudId);
-    if (editKey) params.set("key", editKey);
     const qs = params.toString();
-    return qs ? `${base}?${qs}` : base;
-  };
-
-  const fetchCloudRoom = async (cloudId) => {
-    const res = await fetch(`https://jsonhosting.com/get/${cloudId}`, { cache: "no-store" });
-    if (!res.ok) throw new Error(`Cloud board not found (${res.status})`);
-    return res.json();
-  };
-
-  const syncRoomToCloud = async (doc, roomId) => {
-    const metaKey = CLOUD_META_KEY(roomId || doc.roomId);
-    let meta = null;
-    try {
-      meta = JSON.parse(localStorage.getItem(metaKey) || "null");
-    } catch (e) { meta = null; }
-    if (!meta?.cloudId) {
-      const res = await fetch("https://jsonhosting.com/api/json", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(doc)
-      });
-      if (!res.ok) throw new Error("Could not create cloud board");
-      const data = await res.json();
-      meta = { cloudId: data.id, editKey: data.editKey };
-      localStorage.setItem(metaKey, JSON.stringify(meta));
-      return meta;
-    }
-    const res = await fetch(`https://jsonhosting.com/api/json/${meta.cloudId}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Edit-Key": meta.editKey
-      },
-      body: JSON.stringify(doc)
-    });
-    if (!res.ok) throw new Error("Could not update cloud board");
-    return meta;
+    const root = qs ? `${base}?${qs}` : base;
+    if (!packed) return root;
+    return `${root}#z=${packed}`;
   };
 
   const createTab = (label, bars) => {
@@ -1154,9 +1162,9 @@ License: MIT
     const [compareTabB, setCompareTabB] = useState("");
     const [compareActive, setCompareActive] = useState(false);
     const [shareBaseUrl, setShareBaseUrl] = useState(() => getShareBaseUrl());
-    const [cloudMeta, setCloudMeta] = useState({ cloudId: "", editKey: "" });
     const [shareLink, setShareLink] = useState("");
     const [shareLinkError, setShareLinkError] = useState("");
+    const [shareLinkNote, setShareLinkNote] = useState("");
     const saveTimerRef = useRef(null);
     const roomInitRef = useRef(false);
     const markUnsaved = useCallback(() => setSaveStatus("unsaved"), []);
@@ -1207,48 +1215,46 @@ License: MIT
           const url = new URL(window.location.href);
           url.searchParams.set("room", doc.roomId);
           if (doc.activeTabId) url.searchParams.set("tab", doc.activeTabId);
-          if (cloudMeta.cloudId) url.searchParams.set("cloud", cloudMeta.cloudId);
-          if (cloudMeta.editKey) url.searchParams.set("key", cloudMeta.editKey);
-          window.history.replaceState(null, "", url.pathname + url.search);
+          window.history.replaceState(null, "", url.pathname + url.search + (url.hash || ""));
         }
         setSaveStatus("saved");
         setLastSavedAt(new Date());
         if (!silent) setGridStatus(`Saved board ${doc.roomId}`);
-        syncRoomToCloud(doc, doc.roomId).then((meta) => {
-          if (meta) setCloudMeta(meta);
-        }).catch(() => { /* cloud optional */ });
         return doc;
       } catch (e) {
         setGridError("Save failed: " + (e.message || e));
         return null;
       }
-    }, [buildRoomDoc, roomId, activeTabId, tabs.length, bars, verseTitle, cloudMeta]);
+    }, [buildRoomDoc, roomId, activeTabId, tabs.length, bars, verseTitle]);
     const prepareShareLink = useCallback(async () => {
       setShareLinkError("");
+      setShareLinkNote("");
       const doc = saveRoomNow(true);
       if (!doc) return;
-      let meta = cloudMeta;
       try {
-        const stored = localStorage.getItem(CLOUD_META_KEY(doc.roomId));
-        if (stored) meta = JSON.parse(stored);
-        if (!meta?.cloudId) meta = await syncRoomToCloud(doc, doc.roomId);
-        if (meta) setCloudMeta(meta);
+        const packed = await packRoomDoc(doc);
+        const base = shareBaseUrl || getShareBaseUrl();
+        const link = buildShareUrl(base, doc.roomId, activeTabId, packed);
+        if (!link) {
+          setShareLink("");
+          setShareLinkError(
+            window.location.protocol === "file:" ?
+              "Set a Share link below (must be https://, not a file on your computer)." :
+              "Could not build share link."
+          );
+          return;
+        }
+        setShareLink(link);
+        if (link.length > 2800) {
+          setShareLinkNote("This link is long — QR may be dense. Copy link works reliably.");
+        } else {
+          setShareLinkNote("Your annotations are embedded in this link. Students who scan it will see your grid.");
+        }
       } catch (e) {
-        setShareLinkError("Cloud sync failed — board may not load on other devices. " + (e.message || e));
-      }
-      const base = shareBaseUrl || getShareBaseUrl();
-      const link = buildShareUrl(base, doc.roomId, activeTabId, meta?.cloudId, meta?.editKey);
-      if (!link) {
         setShareLink("");
-        setShareLinkError(
-          window.location.protocol === "file:" ?
-            "Set a Share link below (must be http://, not a file on your computer). Other devices cannot open file:// links." :
-            "Could not build share link."
-        );
-        return;
+        setShareLinkError("Could not pack board for sharing: " + (e.message || e));
       }
-      setShareLink(link);
-    }, [saveRoomNow, cloudMeta, shareBaseUrl, activeTabId]);
+    }, [saveRoomNow, shareBaseUrl, activeTabId]);
     const saveShareBase = useCallback((value) => {
       const trimmed = (value || "").trim().replace(/\/$/, "");
       setShareBaseUrl(trimmed);
@@ -1368,36 +1374,24 @@ License: MIT
       if (roomInitRef.current) return;
       roomInitRef.current = true;
       const loadRoom = async () => {
-        const { room, tab, cloud, editKey } = urlRoomRef.current;
-        if (cloud) {
+        const { room, tab, packed } = urlRoomRef.current;
+        if (packed) {
           try {
-            const doc = await fetchCloudRoom(cloud);
+            const doc = await unpackRoomDoc(packed);
             applyRoomDoc(doc);
-            const meta = { cloudId: cloud, editKey: editKey || "" };
-            if (doc.roomId) {
-              try {
-                const stored = JSON.parse(localStorage.getItem(CLOUD_META_KEY(doc.roomId)) || "null");
-                if (stored?.editKey) meta.editKey = stored.editKey;
-              } catch (e) { /* ignore */ }
-              if (editKey) {
-                meta.editKey = editKey;
-                localStorage.setItem(CLOUD_META_KEY(doc.roomId), JSON.stringify(meta));
-              }
-              setCloudMeta(meta);
-            }
+            if (doc.roomId) localStorage.setItem(ROOM_STORAGE(doc.roomId), JSON.stringify(doc));
             if (tab) {
               const t = doc.tabs?.find((x) => x.id === tab);
               if (t) { setActiveTabId(tab); setBars(t.bars); }
             }
+            setGridStatus("Loaded shared board from link");
             return;
           } catch (e) {
-            setGridError("Could not load cloud board: " + (e.message || e));
+            setGridError("Could not load shared board: " + (e.message || e));
           }
         }
         if (room) {
           try {
-            const storedMeta = JSON.parse(localStorage.getItem(CLOUD_META_KEY(room)) || "null");
-            if (storedMeta?.cloudId) setCloudMeta(storedMeta);
             const raw = localStorage.getItem(ROOM_STORAGE(room));
             if (raw) {
               const doc = JSON.parse(raw);
@@ -3754,6 +3748,14 @@ License: MIT
                 lineHeight: 1.45
               }
             }, shareLinkError),
+            shareLinkNote && !shareLinkError && /* @__PURE__ */ React.createElement("div", {
+              style: {
+                fontSize: 12,
+                color: C.phrase,
+                marginBottom: 12,
+                lineHeight: 1.45
+              }
+            }, shareLinkNote),
             currentUrl ? /* @__PURE__ */ React.createElement("div", {
               style: {
                 display: "flex",
@@ -3814,7 +3816,7 @@ License: MIT
                 lineHeight: 1.5,
                 marginBottom: 14
               }
-            }, "The QR link includes cloud sync so students load your board on their device. Each student can add their own tab with ", /* @__PURE__ */ React.createElement("strong", null, "+"), "."),
+            }, "Your annotations are packed into this link — students who scan see your grid. Each student can add their own tab with ", /* @__PURE__ */ React.createElement("strong", null, "+"), ". Re-open Share / QR after editing to refresh the code."),
             /* @__PURE__ */ React.createElement("button", {
               onClick: () => setShowShare(false),
               style: {
